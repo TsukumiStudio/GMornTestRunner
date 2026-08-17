@@ -75,6 +75,27 @@ if [ -z "$godot_bin" ]; then
 	exit 1
 fi
 
+# ログの置き場を、走りごとに分ける。
+#
+# 一度だけ「`user://logs` へ書けずに落ちた」ことがある。そのときは2本並行で
+# 回していた。エンジンが自分で作るログ（`user://logs/godot<日時>.log`）は名前が
+# **秒までしか持たない**ので、同じ秒に2つ立つとぶつかりうる、というのが立てた
+# 仮説である。
+#
+# **ただしこの仮説は確かめられていない。**3本同時に起動して再現を試みたが、
+# 起動の間が自然にずれて衝突しなかった（3本とも通った）。落ちたときの記録も
+# 残っていない。**だからこれは「効くと確かめた対策」ではない。**
+#
+# それでも分けておくのは、害が無く、次に同じことが起きたときに
+# **エンジンのログの取り合いを容疑者から外せる**ためである。
+# 次に落ちたら、まず出力そのものを残すこと。
+#
+# **足す先は1箇所にする。**Godotを起動する所は3つあり、引数を書き写すと次に
+# 増えたときに漏れる。
+godot_log_dir="${TMPDIR:-/tmp}/gmorn-test-logs"
+mkdir -p "$godot_log_dir"
+godot_log_args=(--log-file "$godot_log_dir/godot-$$.log")
+
 # 時間切れの子プロセスを確実に始末する。取り逃がすとGodotが残り続ける。
 # `timeout` は環境によって入っていない（macOSの既定には無い）ので perl で行う。
 run_limited() {
@@ -147,11 +168,11 @@ run_one() {
 	fi
 	local started=$SECONDS
 	local output status
-	output=$(run_limited "$godot_bin" "$@" --path . --script "$script_path" 2>&1)
+	output=$(run_limited "$godot_bin" "${godot_log_args[@]}" "$@" --path . --script "$script_path" 2>&1)
 	status=$?
 	if [ "$status" -eq 0 ] && only_exit_leak "$output"; then
 		echo "  ${name} は終了時の資源で落ちたのでやり直す"
-		output=$(run_limited "$godot_bin" "$@" --path . --script "$script_path" 2>&1)
+		output=$(run_limited "$godot_bin" "${godot_log_args[@]}" "$@" --path . --script "$script_path" 2>&1)
 		status=$?
 	fi
 	report "$name" "$status" "$output" "$((SECONDS - started))"
@@ -172,7 +193,7 @@ case "$mode" in
 esac
 
 echo "起動確認"
-output=$(run_limited "$godot_bin" --headless --path . --quit 2>&1)
+output=$(run_limited "$godot_bin" "${godot_log_args[@]}" --headless --path . --quit 2>&1)
 status=$?
 noise=$(printf '%s\n' "$output" | grep -E "SCRIPT ERROR|ERROR:|Failed to load" | head -6)
 if [ "$status" -ne 0 ] || [ -n "$noise" ]; then
