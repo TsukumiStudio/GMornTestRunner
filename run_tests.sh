@@ -22,6 +22,7 @@
 #   GMORN_TEST_SUFFIX       テストの名前の後ろ（既定: _test.gd）
 #   GMORN_TEST_TIMEOUT      1本あたりの制限秒（既定: 240）
 #   GMORN_TEST_MARKER       成功の印（既定: TEST: PASS）
+#   GMORN_TEST_JOBS         同時に走らせる本数（既定: 4）
 #   GMORN_TEST_SILENT_ENV   回している間だけ 1 にする環境変数の名前（既定: 無し）
 #   GMORN_TEST_RENDER_POSITION  描画テストの窓の位置（既定: 6000,6000）
 
@@ -36,6 +37,7 @@ test_suffix=${GMORN_TEST_SUFFIX:-_test.gd}
 manifest=${GMORN_TEST_MANIFEST:-$test_dir/tests.conf}
 timeout_seconds=${GMORN_TEST_TIMEOUT:-240}
 pass_marker=${GMORN_TEST_MARKER:-TEST: PASS}
+jobs=${GMORN_TEST_JOBS:-4}
 render_position=${GMORN_TEST_RENDER_POSITION:-6000,6000}
 
 if [ ! -f "$manifest" ]; then
@@ -75,26 +77,28 @@ if [ -z "$godot_bin" ]; then
 	exit 1
 fi
 
-# ログの置き場を、走りごとに分ける。
-#
-# 一度だけ「`user://logs` へ書けずに落ちた」ことがある。そのときは2本並行で
-# 回していた。エンジンが自分で作るログ（`user://logs/godot<日時>.log`）は名前が
-# **秒までしか持たない**ので、同じ秒に2つ立つとぶつかりうる、というのが立てた
-# 仮説である。
-#
-# **ただしこの仮説は確かめられていない。**3本同時に起動して再現を試みたが、
-# 起動の間が自然にずれて衝突しなかった（3本とも通った）。落ちたときの記録も
-# 残っていない。**だからこれは「効くと確かめた対策」ではない。**
-#
-# それでも分けておくのは、害が無く、次に同じことが起きたときに
-# **エンジンのログの取り合いを容疑者から外せる**ためである。
-# 次に落ちたら、まず出力そのものを残すこと。
-#
-# **足す先は1箇所にする。**Godotを起動する所は3つあり、引数を書き写すと次に
-# 増えたときに漏れる。
-godot_log_dir="${TMPDIR:-/tmp}/gmorn-test-logs"
-mkdir -p "$godot_log_dir"
-godot_log_args=(--log-file "$godot_log_dir/godot-$$.log")
+# 各GodotプロセスはHOMEとXDG_DATA_HOMEを共有しない。user:// とGodot自身の
+# 秒単位ログ名が並列実行中に衝突しないためである。成功時は消し、失敗時は
+# 原因を追えるよう実行ログを残す。
+run_dir=""
+worker_pids=()
+
+stop_workers() {
+	local pid
+	for pid in "${worker_pids[@]}"; do
+		kill "$pid" 2>/dev/null || true
+	done
+	for pid in "${worker_pids[@]}"; do
+		wait "$pid" 2>/dev/null || true
+	done
+}
+
+abort_run() {
+	stop_workers
+	[ -z "$run_dir" ] || rm -rf -- "$run_dir"
+	exit 130
+}
+trap abort_run HUP INT TERM
 
 # 時間切れの子プロセスを確実に始末する。取り逃がすとGodotが残り続ける。
 # `timeout` は環境によって入っていない（macOSの既定には無い）ので perl で行う。
@@ -130,9 +134,14 @@ only_exit_leak() {
 }
 
 report() {
-	local name="$1" status="$2" output="$3" elapsed="${4:-}"
+	local name="$1" status="$2" output="$3" elapsed="${4:-}" log_path="${5:-}"
 	local suffix=""
 	[ -n "$elapsed" ] && suffix=" (${elapsed}s)"
+	if printf '%s\n' "$output" | grep -q '^GMORN_TEST_MISSING:'; then
+		failed=$((failed + 1))
+		printf '  %-28s 見つからない(%s)\n' "$name" "${output#GMORN_TEST_MISSING:}"
+		return
+	fi
 	# 実行時エラーはテストの成否と独立に出る。PASSしていても失敗として扱う。
 	# 単発SEが1つも鳴っていない不具合は、まさにこの形で長期間見逃されていた。
 	local runtime_errors
@@ -145,6 +154,7 @@ report() {
 		failed=$((failed + 1))
 		printf '  %-28s 実行時エラー\n' "$name"
 		printf '%s\n' "$runtime_errors" | sed 's/^/      /'
+		[ -n "$log_path" ] && printf '      ログ: %s\n' "$log_path"
 		return
 	fi
 	failed=$((failed + 1))
@@ -154,28 +164,79 @@ report() {
 		printf '  %-28s 失敗(exit=%s)\n' "$name" "$status"
 	fi
 	printf '%s\n' "$output" | grep -E "SCRIPT ERROR|ERROR:|Assertion failed|previously freed|at: " | head -6 | sed 's/^/      /'
+	[ -n "$log_path" ] && printf '      ログ: %s\n' "$log_path"
 }
 
-# 1本回す。落ちた理由が終了時の資源だけなら一度やり直す。
+# 1本の結果をファイルへ書く。worker同士でシェル変数を共有しない。
 run_one() {
-	local name="$1"
-	shift
+	local key="$1" name="$2"
+	shift 2
 	local script_path="$test_dir/${name}${test_suffix}"
+	local result_dir="$run_dir/$key"
+	local output_file="$result_dir/output.log"
+	local home_dir="$result_dir/home"
+	local xdg_dir="$result_dir/xdg"
+	mkdir -p "$home_dir" "$xdg_dir"
 	if [ ! -f "$script_path" ]; then
-		failed=$((failed + 1))
-		printf '  %-28s 見つからない(%s)\n' "$name" "$script_path"
+		printf 'GMORN_TEST_MISSING:%s\n' "$script_path" > "$output_file"
+		printf '127\n' > "$result_dir/status"
+		printf '0\n' > "$result_dir/elapsed"
 		return
 	fi
 	local started=$SECONDS
 	local output status
-	output=$(run_limited "$godot_bin" "${godot_log_args[@]}" "$@" --path . --script "$script_path" 2>&1)
+	output=$(HOME="$home_dir" XDG_DATA_HOME="$xdg_dir" run_limited \
+		"$godot_bin" --log-file "$result_dir/godot.log" "$@" --path . --script "$script_path" 2>&1)
 	status=$?
 	if [ "$status" -eq 0 ] && only_exit_leak "$output"; then
-		echo "  ${name} は終了時の資源で落ちたのでやり直す"
-		output=$(run_limited "$godot_bin" "${godot_log_args[@]}" "$@" --path . --script "$script_path" 2>&1)
+		printf '1\n' > "$result_dir/retried"
+		output=$(HOME="$home_dir" XDG_DATA_HOME="$xdg_dir" run_limited \
+			"$godot_bin" --log-file "$result_dir/godot-retry.log" "$@" --path . --script "$script_path" 2>&1)
 		status=$?
 	fi
-	report "$name" "$status" "$output" "$((SECONDS - started))"
+	printf '%s\n' "$output" > "$output_file"
+	printf '%s\n' "$status" > "$result_dir/status"
+	printf '%s\n' "$((SECONDS - started))" > "$result_dir/elapsed"
+}
+
+# bash 3.2には wait -n が無いので、固定数のworkerへ順番に割り振る。
+run_group() {
+	local group="$1" kind="$2"
+	shift 2
+	local names=("$@")
+	local count=${#names[@]}
+	[ "$count" -gt 0 ] || return
+	local worker_count=$jobs
+	[ "$worker_count" -gt "$count" ] && worker_count=$count
+	local slot index key pid output status elapsed
+	worker_pids=()
+	for ((slot = 0; slot < worker_count; slot++)); do
+		(
+			for ((index = slot; index < count; index += worker_count)); do
+				key=$(printf '%s-%05d' "$group" "$index")
+				if [ "$kind" = headless ]; then
+					run_one "$key" "${names[$index]}" --headless
+				else
+					run_one "$key" "${names[$index]}" --position "$render_position"
+				fi
+			done
+		) &
+		worker_pids+=("$!")
+	done
+	for pid in "${worker_pids[@]}"; do
+		wait "$pid"
+	done
+	worker_pids=()
+	for ((index = 0; index < count; index++)); do
+		key=$(printf '%s-%05d' "$group" "$index")
+		output=$(cat "$run_dir/$key/output.log")
+		status=$(cat "$run_dir/$key/status")
+		elapsed=$(cat "$run_dir/$key/elapsed")
+		if [ -f "$run_dir/$key/retried" ]; then
+			echo "  ${names[$index]} は終了時の資源で落ちたのでやり直した"
+		fi
+		report "${names[$index]}" "$status" "$output" "$elapsed" "$run_dir/$key/output.log"
+	done
 }
 
 # 検証の間は音を出さないようにできる。何度も走らせるので、そのたびに鳴ると邪魔になる。
@@ -186,15 +247,39 @@ fi
 # 既定は「ヘッドレスのみ」。通常描画のテストは本物の窓を開き、位置を画面の外へ
 # 置いてもOSが前面へ出して焦点とマウスを奪う。作業中に何度も走らせるものなので、
 # 既定で開いてはいけない。
-mode="${1:-headless}"
-case "$mode" in
-	headless|render|all) ;;
-	*) echo "使い方: $0 [headless|render|all]"; exit 1 ;;
+mode=headless
+mode_seen=0
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--jobs)
+			[ "$#" -ge 2 ] || { echo "--jobs には正の整数が必要"; exit 1; }
+			jobs=$2
+			shift 2
+			;;
+		--jobs=*) jobs=${1#--jobs=}; shift ;;
+		headless|render|all)
+			[ "$mode_seen" -eq 0 ] || { echo "実行種別は1つだけ指定する"; exit 1; }
+			mode=$1
+			mode_seen=1
+			shift
+			;;
+		*) echo "使い方: $0 [--jobs N] [headless|render|all]"; exit 1 ;;
+	esac
+done
+case "$jobs" in
+	''|*[!0-9]*) echo "並列数は正の整数にする: $jobs"; exit 1 ;;
 esac
+[ "$jobs" -gt 0 ] || { echo "並列数は1以上にする: $jobs"; exit 1; }
+run_dir=$(mktemp -d "${TMPDIR:-/tmp}/gmorn-test-run.XXXXXX") || exit 1
+
+echo "並列数: $jobs"
 
 echo "起動確認"
-output=$(run_limited "$godot_bin" "${godot_log_args[@]}" --headless --path . --quit 2>&1)
+mkdir -p "$run_dir/boot/home" "$run_dir/boot/xdg"
+output=$(HOME="$run_dir/boot/home" XDG_DATA_HOME="$run_dir/boot/xdg" run_limited \
+	"$godot_bin" --log-file "$run_dir/boot/godot.log" --headless --path . --quit 2>&1)
 status=$?
+printf '%s\n' "$output" > "$run_dir/boot/output.log"
 noise=$(printf '%s\n' "$output" | grep -E "SCRIPT ERROR|ERROR:|Failed to load" | head -6)
 if [ "$status" -ne 0 ] || [ -n "$noise" ]; then
 	failed=$((failed + 1))
@@ -207,20 +292,15 @@ fi
 if [ "$mode" = "all" ] || [ "$mode" = "headless" ]; then
 	if [ ${#HEADLESS_TESTS[@]} -gt 0 ]; then
 		echo "ヘッドレス"
-		for name in "${HEADLESS_TESTS[@]}"; do
-			run_one "$name" --headless
-		done
+		run_group headless headless "${HEADLESS_TESTS[@]}"
 	fi
 fi
 
 if [ "$mode" = "all" ] || [ "$mode" = "render" ]; then
 	if [ ${#RENDER_TESTS[@]} -gt 0 ]; then
 		echo "通常描画"
-		for name in "${RENDER_TESTS[@]}"; do
-			# 窓は画面の外へ出す。手元で回すと窓が前に出て焦点とマウスを奪う。
-			# 位置を外へ置いても描画はそのまま行われる（キャプチャで確認済み）。
-			run_one "$name" --position "$render_position"
-		done
+		# 窓は画面の外へ出す。手元で回すと窓が前に出て焦点とマウスを奪う。
+		run_group render render "${RENDER_TESTS[@]}"
 	fi
 fi
 
@@ -229,14 +309,14 @@ fi
 if [ "$mode" = "all" ] || [ "$mode" = "headless" ]; then
 	if [ ${#CLEANUP_TESTS[@]} -gt 0 ]; then
 		echo "後始末"
-		for name in "${CLEANUP_TESTS[@]}"; do
-			run_one "$name" --headless
-		done
+		run_group cleanup headless "${CLEANUP_TESTS[@]}"
 	fi
 fi
 
 if [ "$failed" -ne 0 ]; then
 	echo "失敗 ${failed}件"
+	echo "ログ: $run_dir"
 	exit 1
 fi
+rm -rf -- "$run_dir"
 echo "すべて成功"

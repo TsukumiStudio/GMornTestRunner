@@ -89,6 +89,16 @@ tools/gmorn_test_runner/run_tests.sh render     通常描画のみ（窓が開�
 tools/gmorn_test_runner/run_tests.sh all        両方（窓が開く）
 ```
 
+既定は4並列。逐次実行や並列数の調整はどちらでも指定できる。
+
+```sh
+tools/gmorn_test_runner/run_tests.sh --jobs 1 headless
+GMORN_TEST_JOBS=8 tools/gmorn_test_runner/run_tests.sh headless
+```
+
+各テストは別Godotプロセスで実行し、`HOME` と `XDG_DATA_HOME` も分ける。
+失敗時は終了コード・所要時間とログの場所を表示し、調査用ログを残す。
+
 作業中に何度も走らせるものなので、既定で窓を開いてはいけない。描画テストは位置を画面の外へ置いてもOSが前面へ出し、焦点とマウスを奪う。
 
 包み台本を1つ置いておくと短く書ける。
@@ -112,6 +122,7 @@ GMORN_TEST_SILENT_ENV=MYGAME_SILENT exec tools/gmorn_test_runner/run_tests.sh "$
 | `GMORN_TEST_SUFFIX` | 名前の後ろ | `_test.gd` |
 | `GMORN_TEST_TIMEOUT` | 1本あたりの制限秒 | `240` |
 | `GMORN_TEST_MARKER` | 成功の印 | `TEST: PASS` |
+| `GMORN_TEST_JOBS` | 同時に走らせる本数（`--jobs`が優先） | `4` |
 | `GMORN_TEST_SILENT_ENV` | 回している間だけ `1` にする環境変数の名前 | 無し |
 | `GMORN_TEST_RENDER_POSITION` | 描画テストの窓の位置 | `6000,6000` |
 
