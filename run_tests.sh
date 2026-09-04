@@ -23,6 +23,7 @@
 #   GMORN_TEST_TIMEOUT      1本あたりの制限秒（既定: 240）
 #   GMORN_TEST_MARKER       成功の印（既定: TEST: PASS）
 #   GMORN_TEST_JOBS         同時に走らせる本数（既定: 4）
+#   GMORN_TEST_TIME_SCALE   ヘッドレスの時間倍率（既定: 指定なし）
 #   GMORN_TEST_SILENT_ENV   回している間だけ 1 にする環境変数の名前（既定: 無し）
 #   GMORN_TEST_RENDER_POSITION  描画テストの窓の位置（既定: 6000,6000）
 
@@ -39,6 +40,7 @@ timeout_seconds=${GMORN_TEST_TIMEOUT:-240}
 pass_marker=${GMORN_TEST_MARKER:-TEST: PASS}
 jobs=${GMORN_TEST_JOBS:-4}
 render_position=${GMORN_TEST_RENDER_POSITION:-6000,6000}
+time_scale=${GMORN_TEST_TIME_SCALE:-}
 
 if [ ! -f "$manifest" ]; then
 	echo "一覧の書き付けが無い: $manifest"
@@ -211,6 +213,8 @@ run_group() {
 	[ "$worker_count" -gt "$count" ] && worker_count=$count
 	local queue="$run_dir/$group.queue" token
 	local slot index key pid output status elapsed
+	local headless_args=(--headless)
+	[ -z "$time_scale" ] || headless_args+=(--time-scale "$time_scale")
 	mkfifo "$queue" || exit 1
 	exec 3<> "$queue"
 	rm -f -- "$queue"
@@ -223,7 +227,7 @@ run_group() {
 		key=$(printf '%s-%05d' "$group" "$index")
 		(
 			if [ "$kind" = headless ]; then
-				run_one "$key" "${names[$index]}" --headless
+				run_one "$key" "${names[$index]}" "${headless_args[@]}"
 			else
 				run_one "$key" "${names[$index]}" --position "$render_position"
 			fi

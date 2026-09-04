@@ -123,10 +123,13 @@ GMORN_TEST_SILENT_ENV=MYGAME_SILENT exec tools/gmorn_test_runner/run_tests.sh "$
 | `GMORN_TEST_TIMEOUT` | 1本あたりの制限秒 | `240` |
 | `GMORN_TEST_MARKER` | 成功の印 | `TEST: PASS` |
 | `GMORN_TEST_JOBS` | 同時に走らせる本数（`--jobs`が優先） | `4` |
+| `GMORN_TEST_TIME_SCALE` | ヘッドレスでGodotへ渡す `--time-scale` | 指定なし |
 | `GMORN_TEST_SILENT_ENV` | 回している間だけ `1` にする環境変数の名前 | 無し |
 | `GMORN_TEST_RENDER_POSITION` | 描画テストの窓の位置 | `6000,6000` |
 
 `GMORN_TEST_SILENT_ENV` は、作品側で主バスを消すために使う。`--audio-driver Dummy` と違って再生位置は進むので、音が鳴っているかどうかを見るテストはそのまま通る。
+
+`GMORN_TEST_TIME_SCALE` はヘッドレスだけを早送りする。アニメーション途中など実時間を検査するテストは、テスト側で `Engine.time_scale = 1.0` へ戻す。
 
 ### 手を入れる
 

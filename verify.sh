@@ -38,6 +38,16 @@ func _initialize() -> void:
 	quit(0)
 GD
 
+# ヘッドレスの時間倍率をGodot標準の引数へ渡せる。
+cat > "$work_dir/tests/time_scale_test.gd" <<'GD'
+extends SceneTree
+
+func _initialize() -> void:
+	assert(is_equal_approx(Engine.time_scale, 4.0))
+	print("TIME SCALE TEST: PASS")
+	quit(0)
+GD
+
 # 印は出すが、実行時エラーも出るテスト。落ちなければならない。
 # 単発SEが1つも鳴っていない不具合は、まさにこの形で長期間見逃されていた。
 cat > "$work_dir/tests/noisy_test.gd" <<'GD'
@@ -143,6 +153,14 @@ check "通るものだけなら成功" 0 $?
 printf '%s' "$output" | grep -q "すべて成功" || { echo "  「すべて成功」が出ない"; failed=$((failed + 1)); }
 printf '%s' "$output" | grep -q "後始末" || { echo "  後始末の枠が回っていない"; failed=$((failed + 1)); }
 printf '%s' "$output" | grep -q "並列数: 4" || { echo "  既定の並列数が4ではない"; failed=$((failed + 1)); }
+
+# 指定した時間倍率がヘッドレスのGodotへ渡る。
+cat > "$work_dir/tests/tests.conf" <<'CONF'
+[headless]
+time_scale
+CONF
+GMORN_TEST_TIME_SCALE=4 "$runner_dir/run_tests.sh" headless >/dev/null 2>&1
+check "時間倍率をGodotへ渡す" 0 $?
 
 # --jobsで本当に同時実行され、HOME/XDG_DATA_HOMEが分かれている。
 cat > "$work_dir/tests/tests.conf" <<'CONF'
