@@ -199,8 +199,8 @@ run_one() {
 	printf '%s\n' "$((SECONDS - started))" > "$result_dir/elapsed"
 }
 
-# bash 3.2には wait -n が無いので、FIFOから空いたworkerが次の番号を取る。
-# 遅いテストが特定workerの末尾へ固まらず、worker数だけを固定できる。
+# bash 3.2には wait -n が無いので、FIFOを空き枠のトークンとして使う。
+# 読み手は親1つだけにし、1本終わるたび次を起動して同時実行数を固定する。
 run_group() {
 	local group="$1" kind="$2"
 	shift 2
@@ -209,36 +209,32 @@ run_group() {
 	[ "$count" -gt 0 ] || return
 	local worker_count=$jobs
 	[ "$worker_count" -gt "$count" ] && worker_count=$count
-	local queue="$run_dir/$group.queue"
+	local queue="$run_dir/$group.queue" token
 	local slot index key pid output status elapsed
 	mkfifo "$queue" || exit 1
 	exec 3<> "$queue"
 	rm -f -- "$queue"
 	worker_pids=()
 	for ((slot = 0; slot < worker_count; slot++)); do
+		printf 'ready\n' >&3
+	done
+	for ((index = 0; index < count; index++)); do
+		IFS= read -r token <&3
+		key=$(printf '%s-%05d' "$group" "$index")
 		(
-			while IFS= read -r index <&3; do
-				[ "$index" = stop ] && break
-				key=$(printf '%s-%05d' "$group" "$index")
-				if [ "$kind" = headless ]; then
-					run_one "$key" "${names[$index]}" --headless
-				else
-					run_one "$key" "${names[$index]}" --position "$render_position"
-				fi
-			done
+			if [ "$kind" = headless ]; then
+				run_one "$key" "${names[$index]}" --headless
+			else
+				run_one "$key" "${names[$index]}" --position "$render_position"
+			fi
+			printf 'ready\n' >&3
 		) &
 		worker_pids+=("$!")
 	done
-	for ((index = 0; index < count; index++)); do
-		printf '%s\n' "$index" >&3
-	done
-	for ((slot = 0; slot < worker_count; slot++)); do
-		printf 'stop\n' >&3
-	done
-	exec 3>&-
 	for pid in "${worker_pids[@]}"; do
 		wait "$pid"
 	done
+	exec 3>&-
 	worker_pids=()
 	for ((index = 0; index < count; index++)); do
 		key=$(printf '%s-%05d' "$group" "$index")
