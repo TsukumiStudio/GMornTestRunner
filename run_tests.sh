@@ -104,18 +104,55 @@ trap abort_run HUP INT TERM
 
 # 時間切れの子プロセスを確実に始末する。取り逃がすとGodotが残り続ける。
 # `timeout` は環境によって入っていない（macOSの既定には無い）ので perl で行う。
+#
+# **`assert` が落ちたら、その場で打ち切る。**GDScriptの `assert` は失敗しても
+# 実行を止めない。検査は `quit()` へ辿り着かないまま回り続け、時間切れの上限
+# （既定240秒）を丸ごと使ってから「時間切れ」として報告される。落ちた本当の
+# 理由はログの奥に埋まり、読む側には「なぜか終わらない検査」に見える。実際に
+# 1本の `assert` 失敗が240秒を占め、検査一式の所要を10倍以上に押し上げていた。
+#
+# 見るのは標準出力ではなく `--log-file` の中身である。Godotの標準出力はパイプ
+# 越しだと塊で溜まり、`assert` の行が届くのは終わってからになる。ログの方は
+# エンジンが自分で書き出すので、走っている最中に読める。
 run_limited() {
 	perl -e '
+		use POSIX ":sys_wait_h";
 		my $limit = shift @ARGV;
+		my $log_path = "";
+		for my $i (0 .. $#ARGV - 1) {
+			$log_path = $ARGV[$i + 1] if $ARGV[$i] eq "--log-file";
+		}
 		my $pid = fork();
 		if (!defined $pid) { exit 125; }
 		if ($pid == 0) { exec @ARGV; exit 127; }
-		$SIG{ALRM} = sub { kill "KILL", $pid; };
-		alarm $limit;
-		waitpid($pid, 0);
-		my $status = $?;
-		alarm 0;
-		exit($status & 127 ? 124 : $status >> 8);
+		my $deadline = time() + $limit;
+		my $assert_at = 0;
+		while (1) {
+			if (waitpid($pid, WNOHANG) == $pid) {
+				my $status = $?;
+				exit($status & 127 ? 124 : $status >> 8);
+			}
+			if (time() > $deadline) {
+				kill "KILL", $pid;
+				waitpid($pid, 0);
+				exit 124;
+			}
+			# 失敗の直後にバックトレースが続く。少しだけ書かせてから止める。
+			if ($assert_at && time() >= $assert_at) {
+				kill "KILL", $pid;
+				waitpid($pid, 0);
+				exit 1;
+			}
+			if (!$assert_at && $log_path ne "" && -f $log_path) {
+				if (open(my $fh, "<", $log_path)) {
+					local $/;
+					my $body = <$fh>;
+					close($fh);
+					$assert_at = time() + 1 if defined $body && $body =~ /Assertion failed/;
+				}
+			}
+			select(undef, undef, undef, 0.2);
+		}
 	' "$timeout_seconds" "$@"
 }
 
