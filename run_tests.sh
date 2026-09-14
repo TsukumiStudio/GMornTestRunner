@@ -105,7 +105,7 @@ trap abort_run HUP INT TERM
 # 時間切れの子プロセスを確実に始末する。取り逃がすとGodotが残り続ける。
 # `timeout` は環境によって入っていない（macOSの既定には無い）ので perl で行う。
 #
-# **`assert` が落ちたら、その場で打ち切る。**GDScriptの `assert` は失敗しても
+# **スクリプトエラーが出たら、その場で打ち切る。**GDScriptの `assert` は失敗しても
 # 実行を止めない。検査は `quit()` へ辿り着かないまま回り続け、時間切れの上限
 # （既定240秒）を丸ごと使ってから「時間切れ」として報告される。落ちた本当の
 # 理由はログの奥に埋まり、読む側には「なぜか終わらない検査」に見える。実際に
@@ -148,7 +148,7 @@ run_limited() {
 					local $/;
 					my $body = <$fh>;
 					close($fh);
-					$assert_at = time() + 1 if defined $body && $body =~ /Assertion failed/;
+					$assert_at = time() + 1 if defined $body && $body =~ /SCRIPT ERROR/;
 				}
 			}
 			select(undef, undef, undef, 0.2);
@@ -224,8 +224,16 @@ run_one() {
 	fi
 	local started=$SECONDS
 	local output status
-	output=$(HOME="$home_dir" XDG_DATA_HOME="$xdg_dir" run_limited \
-		"$godot_bin" --log-file "$result_dir/godot.log" "$@" --path . --script "$script_path" 2>&1)
+	output=$(
+		# 新しい保存先は、レンダラーがシェーダーキャッシュを開く前に作る。
+		if [ "$1" != --headless ]; then
+			HOME="$home_dir" XDG_DATA_HOME="$xdg_dir" run_limited \
+				"$godot_bin" --headless --log-file "$result_dir/prepare.log" --path . \
+				--script "$runner_dir/prepare_userdata.gd" 2>&1 || exit $?
+		fi
+		HOME="$home_dir" XDG_DATA_HOME="$xdg_dir" run_limited \
+			"$godot_bin" --log-file "$result_dir/godot.log" "$@" --path . --script "$script_path" 2>&1
+	)
 	status=$?
 	if [ "$status" -eq 0 ] && only_exit_leak "$output"; then
 		printf '1\n' > "$result_dir/retried"
@@ -247,6 +255,8 @@ run_group() {
 	local count=${#names[@]}
 	[ "$count" -gt 0 ] || return
 	local worker_count=$jobs
+	# 画面・マウス・音声デバイスを共有する通常描画は並列化しない。
+	[ "$kind" = render ] && worker_count=1
 	[ "$worker_count" -gt "$count" ] && worker_count=$count
 	local queue="$run_dir/$group.queue" token
 	local slot index key pid output status elapsed

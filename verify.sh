@@ -185,6 +185,22 @@ output=$("$runner_dir/run_tests.sh" headless 2>&1)
 check "印が出ていてもエラーなら落ちる" 1 $?
 cleanup_failure_logs "$output"
 
+# assert以外のスクリプトエラーも、時間切れまで待たずに打ち切る。
+cat > "$work_dir/tests/broken_test.gd" <<'GD'
+extends SceneTree
+func _initialize() -> void:
+	var empty: Variant = {}
+	print(empty.missing)
+GD
+cat > "$work_dir/tests/tests.conf" <<'CONF'
+[headless]
+broken
+CONF
+output=$(GMORN_TEST_TIMEOUT=8 "$runner_dir/run_tests.sh" headless 2>&1)
+check "スクリプトエラーなら即座に落ちる" 1 $?
+printf '%s' "$output" | grep -q "失敗(exit=1)" || { echo "  スクリプトエラーを時間切れまで待っている"; failed=$((failed + 1)); }
+cleanup_failure_logs "$output"
+
 # 印が出なければ落ちる。
 cat > "$work_dir/tests/tests.conf" <<'CONF'
 [headless]
@@ -229,6 +245,46 @@ silent
 CONF
 "$runner_dir/run_tests.sh" headless >/dev/null 2>&1
 check "描画の枠は既定で回らない" 0 $?
+
+# 描画の起動手順だけをヘッドレスで代行し、窓を開かずに分離と逐次実行を確認する。
+cat > "$work_dir/headless-godot" <<'SH'
+#!/bin/bash
+if [[ " $* " != *" --headless "* ]]; then
+	case "$(uname -s)" in
+		Darwin) userdata="$HOME/Library/Application Support/Godot/app_userdata/GMornTestRunner Verify" ;;
+		*) userdata="$XDG_DATA_HOME/godot/app_userdata/GMornTestRunner Verify" ;;
+	esac
+	[ -d "$userdata" ] || { echo "ERROR: 描画前の保存先が無い"; exit 1; }
+fi
+exec "$GMORN_VERIFY_GODOT" --headless "$@"
+SH
+chmod +x "$work_dir/headless-godot"
+cat > "$work_dir/tests/render_a_test.gd" <<'GD'
+extends SceneTree
+
+func _initialize() -> void:
+	call_deferred("_run")
+
+func _run() -> void:
+	assert(DirAccess.dir_exists_absolute(OS.get_user_data_dir()), "描画前の保存先が無い")
+	assert(not FileAccess.file_exists("res://render.lock"), "描画テストが同時実行された")
+	FileAccess.open("res://render.lock", FileAccess.WRITE).close()
+	await create_timer(0.5).timeout
+	DirAccess.remove_absolute("res://render.lock")
+	print("RENDER SETUP TEST: PASS")
+	quit(0)
+GD
+cp "$work_dir/tests/render_a_test.gd" "$work_dir/tests/render_b_test.gd"
+cat > "$work_dir/tests/tests.conf" <<'CONF'
+[render]
+render_a
+render_b
+CONF
+output=$(GMORN_VERIFY_GODOT="${GODOT_BIN:-$(command -v godot)}" GODOT_BIN="$work_dir/headless-godot" \
+	GMORN_TEST_TIMEOUT=8 "$runner_dir/run_tests.sh" --jobs 2 render 2>&1)
+check "描画前に保存先を作り、描画を逐次実行する" 0 $?
+printf '%s\n' "$output"
+cleanup_failure_logs "$output"
 
 # 書き付けが無ければ、黙って0件成功にせず落ちる。
 rm -f "$work_dir/tests/tests.conf"

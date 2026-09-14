@@ -89,7 +89,7 @@ tools/gmorn_test_runner/run_tests.sh render     通常描画のみ（窓が開�
 tools/gmorn_test_runner/run_tests.sh all        両方（窓が開く）
 ```
 
-既定は4並列。逐次実行や並列数の調整はどちらでも指定できる。
+ヘッドレスは既定で4並列。画面・マウス・音声デバイスを共有する通常描画は、`--jobs` にかかわらず1本ずつ実行する。ヘッドレスの並列数は次のように指定できる。
 
 ```sh
 tools/gmorn_test_runner/run_tests.sh --jobs 1 headless
@@ -97,6 +97,8 @@ GMORN_TEST_JOBS=8 tools/gmorn_test_runner/run_tests.sh headless
 ```
 
 各テストは別Godotプロセスで実行し、`HOME` と `XDG_DATA_HOME` も分ける。
+通常描画の前に `prepare_userdata.gd` をヘッドレスで実行して保存先を作る。Godot 4.7のレンダラーは初回の保存先を作らずにシェーダーキャッシュを開くため、この準備が必要。
+スクリプトエラーはassert以外も検出し、タイムアウトを待たずに停止する。
 失敗時は終了コード・所要時間とログの場所を表示し、調査用ログを残す。
 
 作業中に何度も走らせるものなので、既定で窓を開いてはいけない。描画テストは位置を画面の外へ置いてもOSが前面へ出し、焦点とマウスを奪う。
