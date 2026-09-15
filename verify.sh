@@ -240,6 +240,8 @@ cat > "$work_dir/tests/tests.conf" <<'CONF'
 [headless]
 good
 
+[render_parallel]
+silent
 [render]
 silent
 CONF
@@ -285,6 +287,51 @@ output=$(GMORN_VERIFY_GODOT="${GODOT_BIN:-$(command -v godot)}" GODOT_BIN="$work
 check "描画前に保存先を作り、描画を逐次実行する" 0 $?
 printf '%s\n' "$output"
 cleanup_failure_logs "$output"
+
+# 4本すべてが同時起動しないと通らず、逐次組は4本の終了後だけ通る。
+for index in 0 1 2 3; do
+cat > "$work_dir/tests/render_parallel_${index}_test.gd" <<GD
+extends SceneTree
+func _initialize() -> void:
+	FileAccess.open("res://render_${index}.ready", FileAccess.WRITE).close()
+	var deadline := Time.get_ticks_msec() + 3000
+	for other in 4:
+		while not FileAccess.file_exists("res://render_%d.ready" % other) and Time.get_ticks_msec() < deadline:
+			OS.delay_msec(10)
+		assert(FileAccess.file_exists("res://render_%d.ready" % other), "4並列になっていない")
+	FileAccess.open("res://render_${index}.done", FileAccess.WRITE).close()
+	print("RENDER PARALLEL TEST: PASS")
+	quit(0)
+GD
+done
+cat > "$work_dir/tests/render_exclusive_test.gd" <<'GD'
+extends SceneTree
+func _initialize() -> void:
+	for other in 4:
+		assert(FileAccess.file_exists("res://render_%d.done" % other), "逐次組が並列組より先に始まった")
+	print("RENDER EXCLUSIVE TEST: PASS")
+	quit(0)
+GD
+cat > "$work_dir/tests/tests.conf" <<'CONF'
+[render_parallel]
+render_parallel_0
+render_parallel_1
+render_parallel_2
+render_parallel_3
+[render]
+render_exclusive
+render_a
+render_b
+CONF
+output=$(GMORN_VERIFY_GODOT="${GODOT_BIN:-$(command -v godot)}" GODOT_BIN="$work_dir/headless-godot" \
+	GMORN_TEST_RENDER_JOBS=4 GMORN_TEST_TIMEOUT=8 "$runner_dir/run_tests.sh" render 2>&1)
+check "描画4並列の完了後に逐次組を回す" 0 $?
+for name in render_parallel_0 render_parallel_1 render_parallel_2 render_parallel_3 render_exclusive; do
+	printf '%s' "$output" | grep -q "$name .*OK" || { echo "  未実行: $name"; failed=$((failed + 1)); }
+done
+cleanup_failure_logs "$output"
+GMORN_TEST_RENDER_JOBS=0 "$runner_dir/run_tests.sh" render >/dev/null 2>&1
+check "描画並列数0を拒否する" 1 $?
 
 # 書き付けが無ければ、黙って0件成功にせず落ちる。
 rm -f "$work_dir/tests/tests.conf"

@@ -22,7 +22,8 @@
 #   GMORN_TEST_SUFFIX       テストの名前の後ろ（既定: _test.gd）
 #   GMORN_TEST_TIMEOUT      1本あたりの制限秒（既定: 240）
 #   GMORN_TEST_MARKER       成功の印（既定: TEST: PASS）
-#   GMORN_TEST_JOBS         同時に走らせる本数（既定: 4）
+#   GMORN_TEST_JOBS         ヘッドレスを同時に走らせる本数（既定: 4）
+#   GMORN_TEST_RENDER_JOBS  render_parallel枠の並列数（既定: 1）
 #   GMORN_TEST_TIME_SCALE   ヘッドレスの時間倍率（既定: 指定なし）
 #   GMORN_TEST_SILENT_ENV   回している間だけ 1 にする環境変数の名前（既定: 無し）
 #   GMORN_TEST_RENDER_POSITION  描画テストの窓の位置（既定: 6000,6000）
@@ -39,6 +40,7 @@ manifest=${GMORN_TEST_MANIFEST:-$test_dir/tests.conf}
 timeout_seconds=${GMORN_TEST_TIMEOUT:-240}
 pass_marker=${GMORN_TEST_MARKER:-TEST: PASS}
 jobs=${GMORN_TEST_JOBS:-4}
+render_jobs=${GMORN_TEST_RENDER_JOBS:-1}
 render_position=${GMORN_TEST_RENDER_POSITION:-6000,6000}
 time_scale=${GMORN_TEST_TIME_SCALE:-}
 
@@ -47,10 +49,11 @@ if [ ! -f "$manifest" ]; then
 	exit 1
 fi
 
-# 一覧の書き付けを読む。`[headless]` `[render]` `[cleanup]` で区切る。
+# 一覧の書き付けを読む。`[headless]` `[render_parallel]` `[render]` `[cleanup]` で区切る。
 # `#` から後ろと空行は読み飛ばす。
 HEADLESS_TESTS=()
 RENDER_TESTS=()
+RENDER_PARALLEL_TESTS=()
 CLEANUP_TESTS=()
 section=""
 while IFS= read -r line || [ -n "$line" ]; do
@@ -60,11 +63,13 @@ while IFS= read -r line || [ -n "$line" ]; do
 	case "$line" in
 		"[headless]") section=headless; continue ;;
 		"[render]") section=render; continue ;;
+		"[render_parallel]") section=render_parallel; continue ;;
 		"[cleanup]") section=cleanup; continue ;;
 	esac
 	case "$section" in
 		headless) HEADLESS_TESTS+=("$line") ;;
 		render) RENDER_TESTS+=("$line") ;;
+		render_parallel) RENDER_PARALLEL_TESTS+=("$line") ;;
 		cleanup) CLEANUP_TESTS+=("$line") ;;
 		*) echo "区切りの前に名前がある: $line"; exit 1 ;;
 	esac
@@ -255,8 +260,9 @@ run_group() {
 	local count=${#names[@]}
 	[ "$count" -gt 0 ] || return
 	local worker_count=$jobs
-	# 画面・マウス・音声デバイスを共有する通常描画は並列化しない。
+	# 未分類の描画は逐次のまま。並列可と明示した組だけ別の上限を使う。
 	[ "$kind" = render ] && worker_count=1
+	[ "$kind" = render_parallel ] && worker_count=$render_jobs
 	[ "$worker_count" -gt "$count" ] && worker_count=$count
 	local queue="$run_dir/$group.queue" token
 	local slot index key pid output status elapsed
@@ -330,9 +336,13 @@ case "$jobs" in
 	''|*[!0-9]*) echo "並列数は正の整数にする: $jobs"; exit 1 ;;
 esac
 [ "$jobs" -gt 0 ] || { echo "並列数は1以上にする: $jobs"; exit 1; }
+case "$render_jobs" in
+	''|*[!0-9]*) echo "描画並列数は正の整数にする: $render_jobs"; exit 1 ;;
+esac
+[ "$render_jobs" -gt 0 ] || { echo "描画並列数は1以上にする: $render_jobs"; exit 1; }
 run_dir=$(mktemp -d "${TMPDIR:-/tmp}/gmorn-test-run.XXXXXX") || exit 1
 
-echo "並列数: $jobs"
+echo "並列数: $jobs / 描画並列数: ${render_jobs}（render枠は逐次）"
 
 echo "起動確認"
 mkdir -p "$run_dir/boot/home" "$run_dir/boot/xdg"
@@ -357,6 +367,10 @@ if [ "$mode" = "all" ] || [ "$mode" = "headless" ]; then
 fi
 
 if [ "$mode" = "all" ] || [ "$mode" = "render" ]; then
+	if [ ${#RENDER_PARALLEL_TESTS[@]} -gt 0 ]; then
+		echo "通常描画（並列可）"
+		run_group render_parallel render_parallel "${RENDER_PARALLEL_TESTS[@]}"
+	fi
 	if [ ${#RENDER_TESTS[@]} -gt 0 ]; then
 		echo "通常描画"
 		# 窓は画面の外へ出す。手元で回すと窓が前に出て焦点とマウスを奪う。

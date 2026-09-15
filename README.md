@@ -89,7 +89,7 @@ tools/gmorn_test_runner/run_tests.sh render     通常描画のみ（窓が開�
 tools/gmorn_test_runner/run_tests.sh all        両方（窓が開く）
 ```
 
-ヘッドレスは既定で4並列。画面・マウス・音声デバイスを共有する通常描画は、`--jobs` にかかわらず1本ずつ実行する。ヘッドレスの並列数は次のように指定できる。
+ヘッドレスは既定で4並列。`[render]` は `--jobs` にかかわらず1本ずつ実行する。並列安全性を確認した描画テストは `[render_parallel]` に置き、`GMORN_TEST_RENDER_JOBS` で同時実行数を指定する（既定1）。並列組の全件終了後に逐次組を開始する。どちらも `render` / `all` で実行し、保存先・ログはテスト単位で分離する。ヘッドレスの並列数は次のように指定できる。
 
 ```sh
 tools/gmorn_test_runner/run_tests.sh --jobs 1 headless
@@ -124,6 +124,7 @@ GMORN_TEST_SILENT_ENV=MYGAME_SILENT exec tools/gmorn_test_runner/run_tests.sh "$
 | `GMORN_TEST_SUFFIX` | 名前の後ろ | `_test.gd` |
 | `GMORN_TEST_TIMEOUT` | 1本あたりの制限秒 | `240` |
 | `GMORN_TEST_MARKER` | 成功の印 | `TEST: PASS` |
+| `GMORN_TEST_RENDER_JOBS` | `[render_parallel]` の同時実行数。正の整数 | `1` |
 | `GMORN_TEST_JOBS` | 同時に走らせる本数（`--jobs`が優先） | `4` |
 | `GMORN_TEST_TIME_SCALE` | ヘッドレスでGodotへ渡す `--time-scale` | 指定なし |
 | `GMORN_TEST_SILENT_ENV` | 回している間だけ `1` にする環境変数の名前 | 無し |
