@@ -133,10 +133,11 @@ check() {
 }
 
 cleanup_failure_logs() {
-	local output="$1" log_dir
+	local output="$1" log_dir tmp_root="${TMPDIR:-/tmp}"
+	while [ "${tmp_root%/}" != "$tmp_root" ]; do tmp_root=${tmp_root%/}; done
 	log_dir=$(printf '%s\n' "$output" | sed -n 's/^ログ: //p' | tail -1)
 	case "$log_dir" in
-		"${TMPDIR:-/tmp}"/gmorn-test-run.*) rm -rf -- "$log_dir" ;;
+		"$tmp_root"/gmorn-test-run.*) rm -rf -- "$log_dir" ;;
 	esac
 }
 
@@ -174,6 +175,27 @@ printf '%s' "$output" | grep -q "並列数: 2" || { echo "  --jobsが環境変�
 env_a=$(cat "$work_dir/parallel_a.env")
 env_b=$(cat "$work_dir/parallel_b.env")
 [ "$env_a" != "$env_b" ] || { echo "  HOME/XDG_DATA_HOMEが分離されていない"; failed=$((failed + 1)); }
+
+# TMPDIRの末尾が / でも、各テストのHOMEに // を作らない。macOSの既定はこの形で、
+# // を含む保存先ではGodotがシェーダーキャッシュを作れず描画テストが ERROR で落ちる。
+cat > "$work_dir/tests/home_path_test.gd" <<'GD'
+extends SceneTree
+
+func _initialize() -> void:
+	if OS.get_environment("HOME").contains("//"):
+		push_error("HOME contains //: " + OS.get_environment("HOME"))
+		quit(1)
+		return
+	print("HOME PATH TEST: PASS")
+	quit(0)
+GD
+cat > "$work_dir/tests/tests.conf" <<'CONF'
+[headless]
+home_path
+CONF
+output=$(TMPDIR="${TMPDIR:-/tmp}/" "$runner_dir/run_tests.sh" headless 2>&1)
+check "TMPDIR末尾の/でHOMEに//を作らない" 0 $?
+cleanup_failure_logs "$output"
 
 # 印が出ていても実行時エラーがあれば落ちる。
 cat > "$work_dir/tests/tests.conf" <<'CONF'

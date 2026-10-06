@@ -340,7 +340,11 @@ case "$render_jobs" in
 	''|*[!0-9]*) echo "描画並列数は正の整数にする: $render_jobs"; exit 1 ;;
 esac
 [ "$render_jobs" -gt 0 ] || { echo "描画並列数は1以上にする: $render_jobs"; exit 1; }
-run_dir=$(mktemp -d "${TMPDIR:-/tmp}/gmorn-test-run.XXXXXX") || exit 1
+# macOSのTMPDIRは末尾が / なので、そのまま繋ぐと各テストのHOMEが // を含む。
+# Godotは // を含む保存先にシェーダーキャッシュを作れず、描画テストが ERROR で落ちる。
+tmp_root=${TMPDIR:-/tmp}
+while [ "${tmp_root%/}" != "$tmp_root" ]; do tmp_root=${tmp_root%/}; done
+run_dir=$(mktemp -d "$tmp_root/gmorn-test-run.XXXXXX") || exit 1
 
 echo "並列数: $jobs / 描画並列数: ${render_jobs}（render枠は逐次）"
 
