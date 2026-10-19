@@ -1,9 +1,6 @@
 #!/bin/bash
-# この部品だけを確かめる。
-#
-# 一時の置き場へ最小のGodotプロジェクトと、わざと通る／落ちるテストを作って回す。
-# ここで見たいのは「落ちるべきものが落ちる」ことである。通るものが通るだけの
-# 確認では、判定が甘い側へ壊れたときに気付けない。
+# 一時の最小プロジェクトで、わざと通る／落ちるテストを回す。
+# 「落ちるべきものが落ちる」を見ないと、判定が甘い側へ壊れたときに気付けない。
 set -u
 
 runner_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -11,8 +8,7 @@ work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
 mkdir -p "$work_dir/tests"
-# 起動確認は主場面を開いて閉じる。主場面が無いとGodotは待ち続けるので、
-# 空でも1つ置く。
+# 主場面が無いと起動確認の Godot が待ち続けるので、空でも1つ置く。
 cat > "$work_dir/main.tscn" <<'SCENE'
 [gd_scene format=3]
 
@@ -49,7 +45,6 @@ func _initialize() -> void:
 GD
 
 # 印は出すが、実行時エラーも出るテスト。落ちなければならない。
-# 単発SEが1つも鳴っていない不具合は、まさにこの形で長期間見逃されていた。
 cat > "$work_dir/tests/noisy_test.gd" <<'GD'
 extends SceneTree
 
@@ -232,7 +227,7 @@ output=$("$runner_dir/run_tests.sh" headless 2>&1)
 check "印が無ければ落ちる" 1 $?
 cleanup_failure_logs "$output"
 
-# 無い名前を書いたら落ちる。黙って読み飛ばすと、消したテストに気付けない。
+# 無い名前は落ちる。黙って読み飛ばすと、消したテストに気付けない。
 cat > "$work_dir/tests/tests.conf" <<'CONF'
 [headless]
 missing
@@ -257,7 +252,7 @@ if kill -0 "$hang_pid" 2>/dev/null; then
 fi
 cleanup_failure_logs "$output"
 
-# 描画の枠はヘッドレスでは回らない。取り違えると、窓の要るテストが常に落ちる。
+# 描画の枠はヘッドレスでは回らない。
 cat > "$work_dir/tests/tests.conf" <<'CONF'
 [headless]
 good

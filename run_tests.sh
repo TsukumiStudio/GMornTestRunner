@@ -1,32 +1,7 @@
 #!/bin/bash
-# Godotのテストを、正しい実行環境で回す。
-#
-# テストは2種類ある。取り違えると、音声の実再生や演出の途中状態を見るテストが
-# 常に落ちるか、逆に検証されないまま通ったことになる。
-#   ヘッドレス : シーン生成、状態遷移、計算、保存変換、入力のルーティング
-#   通常描画   : AudioStreamPlayerの実再生、Tweenの実時間演出、Shader、マウス挙動
-#
-# 使い方:
-#   run_tests.sh            ヘッドレスのみ（既定。窓を開かない）
-#   run_tests.sh headless   同上
-#   run_tests.sh render     通常描画のみ（窓が開く。頼まれたときだけ）
-#   run_tests.sh all        両方（窓が開く。頼まれたときだけ）
-#
-# 何を回すかは一覧の書き付け（既定 `tests/tests.conf`）で決める。書式は README.md を参照。
-#
-# 設定はすべて環境変数で渡せる。
-#   GODOT_BIN               Godot実行ファイル
-#   GMORN_TEST_PROJECT      プロジェクトの場所（既定: この台本の親の親）
-#   GMORN_TEST_MANIFEST     一覧の書き付け（既定: $GMORN_TEST_PROJECT/tests/tests.conf）
-#   GMORN_TEST_DIR          テストの置き場（既定: tests）
-#   GMORN_TEST_SUFFIX       テストの名前の後ろ（既定: _test.gd）
-#   GMORN_TEST_TIMEOUT      1本あたりの制限秒（既定: 240）
-#   GMORN_TEST_MARKER       成功の印（既定: TEST: PASS）
-#   GMORN_TEST_JOBS         ヘッドレスを同時に走らせる本数（既定: 4）
-#   GMORN_TEST_RENDER_JOBS  render_parallel枠の並列数（既定: 1）
-#   GMORN_TEST_TIME_SCALE   ヘッドレスの時間倍率（既定: 指定なし）
-#   GMORN_TEST_SILENT_ENV   回している間だけ 1 にする環境変数の名前（既定: 無し）
-#   GMORN_TEST_RENDER_POSITION  描画テストの窓の位置（既定: 6000,6000）
+# Godot のテストをヘッドレス／通常描画の枠で回す。
+# 使い方: run_tests.sh [--jobs N] [headless|render|all]（既定 headless）
+# 書き付けの書式と環境変数は README.md を参照。
 
 set -u
 
@@ -49,8 +24,6 @@ if [ ! -f "$manifest" ]; then
 	exit 1
 fi
 
-# 一覧の書き付けを読む。`[headless]` `[render_parallel]` `[render]` `[cleanup]` で区切る。
-# `#` から後ろと空行は読み飛ばす。
 HEADLESS_TESTS=()
 RENDER_TESTS=()
 RENDER_PARALLEL_TESTS=()
@@ -84,9 +57,8 @@ if [ -z "$godot_bin" ]; then
 	exit 1
 fi
 
-# 各GodotプロセスはHOMEとXDG_DATA_HOMEを共有しない。user:// とGodot自身の
-# 秒単位ログ名が並列実行中に衝突しないためである。成功時は消し、失敗時は
-# 原因を追えるよう実行ログを残す。
+# 各 Godot プロセスは HOME と XDG_DATA_HOME を共有しない。user:// と Godot 自身の
+# 秒単位ログ名が並列実行中に衝突する。失敗時は実行ログを残す。
 run_dir=""
 worker_pids=()
 
@@ -107,18 +79,12 @@ abort_run() {
 }
 trap abort_run HUP INT TERM
 
-# 時間切れの子プロセスを確実に始末する。取り逃がすとGodotが残り続ける。
-# `timeout` は環境によって入っていない（macOSの既定には無い）ので perl で行う。
+# `timeout` は macOS の既定に無いので perl で時間切れを行い、子プロセスを kill する。
 #
-# **スクリプトエラーが出たら、その場で打ち切る。**GDScriptの `assert` は失敗しても
-# 実行を止めない。検査は `quit()` へ辿り着かないまま回り続け、時間切れの上限
-# （既定240秒）を丸ごと使ってから「時間切れ」として報告される。落ちた本当の
-# 理由はログの奥に埋まり、読む側には「なぜか終わらない検査」に見える。実際に
-# 1本の `assert` 失敗が240秒を占め、検査一式の所要を10倍以上に押し上げていた。
-#
-# 見るのは標準出力ではなく `--log-file` の中身である。Godotの標準出力はパイプ
-# 越しだと塊で溜まり、`assert` の行が届くのは終わってからになる。ログの方は
-# エンジンが自分で書き出すので、走っている最中に読める。
+# スクリプトエラーが出たらその場で打ち切る。GDScript の `assert` は失敗しても実行を
+# 止めず、`quit()` へ辿り着かないまま時間切れまで回り続ける。
+# 見るのは標準出力ではなく `--log-file`。標準出力はパイプ越しだと塊で溜まり、
+# `assert` の行が届くのは終わってからになる。
 run_limited() {
 	perl -e '
 		use POSIX ":sys_wait_h";
@@ -142,7 +108,7 @@ run_limited() {
 				waitpid($pid, 0);
 				exit 124;
 			}
-			# 失敗の直後にバックトレースが続く。少しだけ書かせてから止める。
+			# 失敗の直後にバックトレースが続くので、少しだけ書かせてから止める。
 			if ($assert_at && time() >= $assert_at) {
 				kill "KILL", $pid;
 				waitpid($pid, 0);
@@ -163,11 +129,8 @@ run_limited() {
 
 failed=0
 
-# 終了時の資源の後始末は、エンジン側の解放順に左右されて時々こぼれる。
-# 音声の再生ノードを木ごとたどって切る対処を入れてもなお、4回に1回ほど
-# `N resources still in use at exit` が出る。テスト自体は通っているのに
-# 落ちるため、この1行だけが理由のときに限って一度やり直す。
-# 他のエラーが混じっていれば、やり直さずそのまま落とす。
+# `N resources still in use at exit` はエンジン側の解放順で時々出る。テスト自体は
+# 通っているので、この1行だけが理由のときに限って一度やり直す。
 only_exit_leak() {
 	local text="$1"
 	local errors
@@ -186,8 +149,7 @@ report() {
 		printf '  %-28s 見つからない(%s)\n' "$name" "${output#GMORN_TEST_MISSING:}"
 		return
 	fi
-	# 実行時エラーはテストの成否と独立に出る。PASSしていても失敗として扱う。
-	# 単発SEが1つも鳴っていない不具合は、まさにこの形で長期間見逃されていた。
+	# 実行時エラーはテストの成否と独立に出る。PASS していても失敗として扱う。
 	local runtime_errors
 	runtime_errors=$(printf '%s\n' "$output" | grep -E "SCRIPT ERROR|ERROR:|Failed to load" | head -6)
 	if [ "$status" -eq 0 ] && [ -z "$runtime_errors" ] && printf '%s' "$output" | grep -q "$pass_marker"; then
@@ -211,7 +173,7 @@ report() {
 	[ -n "$log_path" ] && printf '      ログ: %s\n' "$log_path"
 }
 
-# 1本の結果をファイルへ書く。worker同士でシェル変数を共有しない。
+# 結果はファイルへ書く。worker 同士でシェル変数を共有できない。
 run_one() {
 	local key="$1" name="$2"
 	shift 2
@@ -230,7 +192,7 @@ run_one() {
 	local started=$SECONDS
 	local output status
 	output=$(
-		# 新しい保存先は、レンダラーがシェーダーキャッシュを開く前に作る。
+		# 保存先はレンダラーがシェーダーキャッシュを開く前に作る。
 		if [ "$1" != --headless ]; then
 			HOME="$home_dir" XDG_DATA_HOME="$xdg_dir" run_limited \
 				"$godot_bin" --headless --log-file "$result_dir/prepare.log" --path . \
@@ -251,8 +213,7 @@ run_one() {
 	printf '%s\n' "$((SECONDS - started))" > "$result_dir/elapsed"
 }
 
-# bash 3.2には wait -n が無いので、FIFOを空き枠のトークンとして使う。
-# 読み手は親1つだけにし、1本終わるたび次を起動して同時実行数を固定する。
+# bash 3.2 には wait -n が無いので、FIFO を空き枠のトークンとして使う。
 run_group() {
 	local group="$1" kind="$2"
 	shift 2
@@ -260,7 +221,7 @@ run_group() {
 	local count=${#names[@]}
 	[ "$count" -gt 0 ] || return
 	local worker_count=$jobs
-	# 未分類の描画は逐次のまま。並列可と明示した組だけ別の上限を使う。
+	# 並列可と明示した組だけ別の上限を使う。
 	[ "$kind" = render ] && worker_count=1
 	[ "$kind" = render_parallel ] && worker_count=$render_jobs
 	[ "$worker_count" -gt "$count" ] && worker_count=$count
@@ -305,14 +266,12 @@ run_group() {
 	done
 }
 
-# 検証の間は音を出さないようにできる。何度も走らせるので、そのたびに鳴ると邪魔になる。
 if [ -n "${GMORN_TEST_SILENT_ENV:-}" ]; then
 	export "${GMORN_TEST_SILENT_ENV}=1"
 fi
 
-# 既定は「ヘッドレスのみ」。通常描画のテストは本物の窓を開き、位置を画面の外へ
-# 置いてもOSが前面へ出して焦点とマウスを奪う。作業中に何度も走らせるものなので、
-# 既定で開いてはいけない。
+# 既定はヘッドレスのみ。描画テストの窓は画面の外へ置いても OS が前面へ出し、
+# 焦点とマウスを奪う。
 mode=headless
 mode_seen=0
 while [ "$#" -gt 0 ]; do
@@ -377,13 +336,11 @@ if [ "$mode" = "all" ] || [ "$mode" = "render" ]; then
 	fi
 	if [ ${#RENDER_TESTS[@]} -gt 0 ]; then
 		echo "通常描画"
-		# 窓は画面の外へ出す。手元で回すと窓が前に出て焦点とマウスを奪う。
 		run_group render render "${RENDER_TESTS[@]}"
 	fi
 fi
 
-# 後始末の確認は全テストの後に置く。保存を扱うテストが本物の置き場に残骸を
-# 作っていないかを見るため、順番を入れ替えてはいけない。
+# 後始末は全テストの後。保存を扱うテストが本物の置き場に残骸を作っていないかを見る。
 if [ "$mode" = "all" ] || [ "$mode" = "headless" ]; then
 	if [ ${#CLEANUP_TESTS[@]} -gt 0 ]; then
 		echo "後始末"
